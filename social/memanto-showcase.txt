@@ -1,0 +1,44 @@
+## Texto para Reddit (r/ClaudeAI ou r/LocalLLaMA)
+
+---
+
+I built a cross-session engineering memory bridge for Claude Code skills using Memanto — here's why
+
+If you use mattpocock's developer skills (/grill-with-docs, /tdd, /handoff), you've probably hit this: your architectural decisions from one session vanish when you open a fresh terminal. You end up re-explaining "use PostgreSQL with UUID primary keys" and "store amounts in cents" over and over.
+
+I built a lightweight bridge that wraps the Claude Code skills lifecycle with Memanto's memory backend:
+
+1. **Before** a skill runs → `memanto recall` injects relevant past decisions
+2. **After** a skill completes → `memanto remember` distills and stores the engineering choices
+3. **Next session** → any skill automatically gets the right context
+
+Key features:
+- Auto-tagging (architecture, database, security, testing, coding-style, infrastructure)
+- Credential-free preview mode for reviewers (no API key needed)
+- Full lifecycle wrapper: `skills-memory.sh wrap /tdd "implement auth"`
+- Works with Claude Code hooks (PreToolUse/PostToolUse)
+
+Demo: architectural decisions from a /grill-with-docs session automatically carry into /tdd and /handoff sessions. Zero repeated instructions.
+
+Open source PR: https://github.com/moorcheh-ai/memanto/pull/538
+
+#moorcheh-ai #ClaudeCode #DevTools
+
+---
+
+## Texto para X/Twitter
+
+---
+
+Built a cross-session memory bridge for Claude Code skills × Memanto
+
+Problem: /grill-with-docs designs your architecture, but /tdd in a fresh session has zero context about those decisions.
+
+Solution: pre/post skill hooks that recall + store engineering memories automatically.
+
+Zero repeated instructions. Open source:
+https://github.com/moorcheh-ai/memanto/pull/538
+
+#moorcheh-ai #ClaudeCode #DevTools #AICoding
+
+---

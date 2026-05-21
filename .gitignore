@@ -1,0 +1,9 @@
+# Work directories (separate repos)
+work/
+
+# Results and logs (local data)
+results/
+logs/
+
+# OS
+.DS_Store

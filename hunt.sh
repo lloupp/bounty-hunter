@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# Bounty Hunter - Script principal
+# Uso: ./hunt.sh [comando]
+#
+# Comandos:
+#   search       - Busca bounties disponiveis
+#   work N       - Delega bounty #N para o Codex
+#   quick N      - Delega bounty #N com prompt rapido (tipo Chrisgpt)
+#   status       - Mostra status dos trabalhos em andamento
+#   earnings     - Mostra ganhos acumulados
+#   list         - Lista bounties do ultimo search
+
+set -euo pipefail
+
+BH_DIR="$HOME/bounty-hunter"
+RESULTS_DIR="$BH_DIR/results"
+WORK_DIR="$BH_DIR/work"
+LOG_DIR="$BH_DIR/logs"
+
+mkdir -p "$RESULTS_DIR" "$WORK_DIR" "$LOG_DIR"
+
+_get_bounty() {
+    local NUM="$1"
+    if [ ! -f "$RESULTS_DIR/latest.json" ]; then
+        echo "Nenhum resultado encontrado. Rode './hunt.sh search' primeiro."
+        exit 1
+    fi
+    
+    python3 -c "
+import json, sys
+with open('$RESULTS_DIR/latest.json') as f:
+    data = json.load(f)
+idx = int('$NUM') - 1
+if idx < 0 or idx >= len(data['bounties']):
+    print('ERROR: Numero invalido. Use 1 a', len(data['bounties']), file=sys.stderr)
+    sys.exit(1)
+b = data['bounties'][idx]
+print(json.dumps(b))
+"
+}
+
+case "${1:-search}" in
+    search)
+        echo "=== Buscando bounties ==="
+        python3 "$BH_DIR/scripts/search-bounties.py"
+        echo ""
+        echo "Para trabalhar numa bounty: ./hunt.sh work <NUMERO>"
+        echo "Para dispatch rapido: ./hunt.sh quick <NUMERO>"
+        ;;
+    
+    list)
+        if [ ! -f "$RESULTS_DIR/latest.json" ]; then
+            echo "Nenhum resultado. Rode './hunt.sh search' primeiro."
+            exit 1
+        fi
+        python3 -c "
+import json
+with open('$RESULTS_DIR/latest.json') as f:
+    data = json.load(f)
+for i, b in enumerate(data['bounties'], 1):
+    v = f\"\${b['value']:,.0f}\" if b['value'] else '\$?'
+    ai = ' [AI]' if b.get('ai_friendly') else ''
+    cat = b.get('category','?').upper()
+    print(f\"  {i:2d}. {v:>8s}  [{cat:<13s}]{ai}  {b['title'][:60]}\")
+"
+        ;;
+    
+    work)
+        NUM="${2:-}"
+        if [ -z "$NUM" ]; then
+            echo "Uso: ./hunt.sh work <NUMERO_DA_BOUNTY>"
+            echo "Rode './hunt.sh list' para ver as bounties."
+            exit 1
+        fi
+        
+        BOUNTY=$(_get_bounty "$NUM") || exit 1
+        
+        TITLE=$(echo "$BOUNTY" | python3 -c "import json,sys; print(json.load(sys.stdin)['title'])")
+        URL=$(echo "$BOUNTY" | python3 -c "import json,sys; print(json.load(sys.stdin)['url'])")
+        REPO=$(echo "$BOUNTY" | python3 -c "import json,sys; print(json.load(sys.stdin)['repo'])")
+        VALUE=$(echo "$BOUNTY" | python3 -c "import json,sys; b=json.load(sys.stdin); print(b['value'] or '?')")
+        
+        echo "=== Trabalhando na Bounty #$NUM ==="
+        echo "Titulo: $TITLE"
+        echo "Repo: $REPO"
+        echo "Valor: \$$VALUE"
+        echo "URL: $URL"
+        echo ""
+        
+        # Clonar o repo
+        WORKSPACE="$WORK_DIR/$(echo $REPO | tr '/' '-')"
+        if [ ! -d "$WORKSPACE" ]; then
+            echo "Clonando $REPO..."
+            gh repo clone "$REPO" "$WORKSPACE" 2>&1 || {
+                echo "Tentando via git clone..."
+                git clone "https://github.com/$REPO.git" "$WORKSPACE" 2>&1
+            }
+        else
+            echo "Repo ja clonado em $WORKSPACE"
+            cd "$WORKSPACE" && git pull 2>&1 || true
+        fi
+        
+        echo ""
+        echo "=== Delegando para Codex ==="
+        echo ""
+        
+        # Prompt detalhado para o Codex
+        PROMPT="Resolva esta GitHub issue: $TITLE. Issue URL: $URL. Instrucoes: 1) Leia a issue completa. 2) Entenda o contexto do projeto. 3) Implemente a correcao/feature. 4) Escreva testes se aplicavel. 5) Crie uma branch descritiva. 6) Faca commit e push. 7) Abra um PR referenciando a issue. NAO inclua informacoes de pagamento. NAO mencione IA ou automacao."
+        
+        codex exec --cwd "$WORKSPACE" "$PROMPT" 2>&1 | tee "$LOG_DIR/bounty-${NUM}-$(date +%Y%m%d-%H%M%S).log"
+        
+        # Log
+        echo "$(date -Iseconds) | WORK | #$NUM | $REPO | $TITLE | \$$VALUE" >> "$LOG_DIR/hunt.log"
+        ;;
+    
+    quick)
+        NUM="${2:-}"
+        if [ -z "$NUM" ]; then
+            echo "Uso: ./hunt.sh quick <NUMERO_DA_BOUNTY>"
+            exit 1
+        fi
+        
+        BOUNTY=$(_get_bounty "$NUM") || exit 1
+        
+        TITLE=$(echo "$BOUNTY" | python3 -c "import json,sys; print(json.load(sys.stdin)['title'])")
+        URL=$(echo "$BOUNTY" | python3 -c "import json,sys; print(json.load(sys.stdin)['url'])")
+        REPO=$(echo "$BOUNTY" | python3 -c "import json,sys; print(json.load(sys.stdin)['repo'])")
+        VALUE=$(echo "$BOUNTY" | python3 -c "import json,sys; b=json.load(sys.stdin); print(b['value'] or '?')")
+        
+        echo "=== Quick Dispatch: Bounty #$NUM ==="
+        echo "Titulo: $TITLE"
+        echo "Repo: $REPO | Valor: \$$VALUE"
+        echo ""
+        
+        # Clonar
+        WORKSPACE="$WORK_DIR/$(echo $REPO | tr '/' '-')"
+        if [ ! -d "$WORKSPACE" ]; then
+            echo "Clonando $REPO..."
+            gh repo clone "$REPO" "$WORKSPACE" 2>&1
+        fi
+        
+        # Prompt tipo "Chrisgpt" - simples e direto
+        PROMPT="Make me \$$VALUE and do what you are good at! Resolve this issue: $TITLE. URL: $URL"
+        
+        echo "Dispatching Codex..."
+        codex exec --cwd "$WORKSPACE" "$PROMPT" 2>&1 | tee "$LOG_DIR/bounty-${NUM}-quick-$(date +%Y%m%d-%H%M%S).log"
+        
+        echo "$(date -Iseconds) | QUICK | #$NUM | $REPO | $TITLE | \$$VALUE" >> "$LOG_DIR/hunt.log"
+        ;;
+    
+    status)
+        echo "=== Status dos trabalhos ==="
+        if [ -f "$LOG_DIR/hunt.log" ]; then
+            cat "$LOG_DIR/hunt.log"
+        else
+            echo "Nenhum trabalho registrado ainda."
+        fi
+        echo ""
+        echo "Repositorios clonados:"
+        ls -1 "$WORK_DIR" 2>/dev/null || echo "  (nenhum)"
+        ;;
+    
+    earnings)
+        echo "=== Ganhos ==="
+        if [ -f "$LOG_DIR/earnings.log" ]; then
+            cat "$LOG_DIR/earnings.log"
+            echo ""
+            TOTAL=$(awk -F'|' '{gsub(/[^0-9.]/,"",$5); sum+=$5} END{print sum}' "$LOG_DIR/earnings.log")
+            echo "TOTAL: \$$TOTAL"
+        else
+            echo "Nenhum ganho registrado ainda."
+            echo ""
+            echo "Para registrar um pagamento:"
+            echo "  echo \"\$(date -Iseconds) | PAGO | repo | bounty | VALOR\" >> $LOG_DIR/earnings.log"
+        fi
+        ;;
+    
+    *)
+        echo "Comando desconhecido: $1"
+        echo ""
+        echo "Uso: ./hunt.sh [comando]"
+        echo ""
+        echo "Comandos:"
+        echo "  search       Busca bounties disponiveis"
+        echo "  list         Lista bounties do ultimo search"
+        echo "  work N       Delega bounty #N para Codex (prompt detalhado)"
+        echo "  quick N      Delega bounty #N para Codex (prompt rapido estilo Chrisgpt)"
+        echo "  status       Mostra status dos trabalhos"
+        echo "  earnings     Mostra ganhos acumulados"
+        exit 1
+        ;;
+esac
