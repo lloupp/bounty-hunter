@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Bounty Hunter - Busca de bounties open-source
-Procura issues remuneradas no GitHub via gh CLI.
-Filtra por confiabilidade — qualquer valor, mas so as legit.
+Procura issues remuneradas no GitHub via gh API.
+Filtra por confiabilidade, competencia e valor.
 """
 
 import subprocess
@@ -17,84 +17,94 @@ RESULTS_DIR = os.path.join(BH_DIR, "results")
 
 # --- Confiabilidade ---
 # Repos com pagamento comprovado (empresa real ou historico de payouts)
-TRUSTED_REPOS = {
-    "Expensify/App",
-    "spaceandtimefdn/sxt-proof-of-sql",
-    "hnpy/hn",
-    "claude-builders-bounty/claude-builders-bounty",
+TRUSTED_ORGS = {
+    "archestra-ai",      # $5-$7.5K bounties, 3720 stars, active
+    "coollabsio",        # Coolify - $50 bounties via Algora
+    "openstreetmap-ng",  # Zaczero pays reliably, 18+ bounties paid
+    "Expensify",
+    "permitio",
 }
 
 # Repos suspeitos (valor alto sem historico, criados recentemente, possivel scam)
 SUSPECT_REPOS = {
- "orchestration-agent/AgentOrchestration",
- "SecureBananaLabs/bug-bounty",
+    "UnsafeLabs/Bounty-Hunters",        # scam: 0 PRs merged, requires Fortran/Cobol/MUMPS
+    "SecureBananaLabs/bug-bounty",       # 100+ AI agent comments per issue, spam
+    "Scottcjn/rustchain-bounties",       # joke bounties (Amiga/68K Mac), token $0.10
+    "orchestration-agent/AgentOrchestration",
+    "kolotikwoan/robot-001",             # spam/test repo
+    "Sagargajare/probot-test-repo",      # test issue
+    "alvaroechevarriacuesta/sync-test",  # test bounty notifications, not real
+    "mitchm11/my-repo",                  # personal test repo
 }
 
 # Sinais de suspeita no titulo/labels
 SUSPECT_SIGNALS = [
     "urgent", "immediate", "quick money", "easy $",
+    "fortran", "cobol", "mumps", "prolog", "pl/i", "ada",
 ]
 
 
-def run_gh_search(query, limit=30):
-    """Roda gh search issues e retorna parsed via texto."""
-    cmd = ["gh", "search", "issues", "--limit", str(limit), "--sort", "updated", query]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+def run_gh_api(query, limit=30):
+    """Roda gh api search/issues e retorna parsed JSON."""
+    cmd = [
+        "gh", "api", f"search/issues?q={query}&sort=updated&order=desc&per_page={limit}",
+        "--jq", '.items[] | {repo: (.repository_url | split("/") | .[-2] + "/" + .[-1]), number, title: .title, url: .html_url, comments, labels: [.labels[].name], created: .created_at, updated: .updated_at}'
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if result.returncode != 0:
+        print(f"  [warn] Search failed: {result.stderr[:100]}", file=sys.stderr)
         return []
 
-    lines = result.stdout.strip().split("\n")
     items = []
-    for line in lines:
-        if not line.strip():
+    for line in result.stdout.strip().split("\n"):
+        line = line.strip()
+        if not line:
             continue
-        parts = line.split("\t")
-        if len(parts) >= 4:
-            repo = parts[0].strip()
-            url = f"https://github.com/{repo}/issues/{parts[1].strip()}"
-            items.append({
-                "repo": repo,
-                "title": parts[3].strip() if len(parts) > 3 else "",
-                "labels": parts[4].strip() if len(parts) > 4 else "",
-                "url": url,
-            })
+        try:
+            items.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
     return items
 
 
-def extract_bounty_value(text):
-    """Extrai valor monetario de texto."""
-    m = re.search(r'\$\s*([\d,]+)\s*(k|K)?', text)
+def extract_bounty_value(labels, title=""):
+    """Extrai valor monetario de labels como '$150', '$1.5k', etc."""
+    # Check labels first (most reliable)
+    for label in labels:
+        m = re.match(r'\$([0-9]+(?:\.[0-9]+)?)\s*(k|K)?', label)
+        if m:
+            val = float(m.group(1))
+            if m.group(2) and m.group(2).lower() == "k":
+                val *= 1000
+            return val
+    # Fallback: check title
+    m = re.search(r'\$\s*([0-9,]+)\s*(k|K)?', title)
     if m:
         val_str = m.group(1).replace(",", "")
-        if not val_str:
-            return None
-        value = float(val_str)
-        if m.group(2) and m.group(2).lower() == "k":
-            value *= 1000
-        return value
-
-    m = re.search(r'bounty:\s*(\d+)\s*usd', text, re.I)
-    if m:
-        return float(m.group(1))
-
+        if val_str:
+            val = float(val_str)
+            if m.group(2) and m.group(2).lower() == "k":
+                val *= 1000
+            return val
     return None
 
 
 def get_trust_level(repo, value, title, labels):
     """
     Classifica confiabilidade da bounty.
-    VERDE  = confiavel (pagamento provavel)
+    VERDE = confiavel (pagamento provavel)
     AMARELO = cautela (precisa verificar)
     VERMELHO = suspeito (provavelmente nao paga ou e scam)
     """
-    text = (title + " " + labels).lower()
+    text = (title + " " + " ".join(labels)).lower()
+    org = repo.split("/")[0] if "/" in repo else ""
 
     # Hard-coded suspeitos
     if repo in SUSPECT_REPOS:
         return "VERMELHO"
 
     # Hard-coded confiaveis
-    if repo in TRUSTED_REPOS:
+    if org in TRUSTED_ORGS or repo in TRUSTED_ORGS:
         return "VERDE"
 
     # Sinais de scam no titulo
@@ -115,14 +125,14 @@ def get_trust_level(repo, value, title, labels):
 
 def categorize_bounty(title, labels):
     """Categoriza o tipo de bounty."""
-    text = (title + " " + labels).lower()
+    text = (title + " " + " ".join(labels)).lower()
     if any(w in text for w in ["security", "vuln", "audit", "cve", "xss", "inject", "auth", "jwt", "hook", "destructive", "block"]):
         return "seguranca"
-    if any(w in text for w in ["doc", "document", "readme", "tutorial", "guide", "content", "template", "claudemd"]):
+    if any(w in text for w in ["doc", "document", "readme", "tutorial", "guide", "content", "template"]):
         return "documentacao"
     if any(w in text for w in ["bug", "fix", "crash", "error", "broken", "prevent", "reject", "validate", "verify", "enforce"]):
         return "bugfix"
-    if any(w in text for w in ["feature", "add", "implement", "support", "create"]):
+    if any(w in text for w in ["feature", "add", "implement", "support", "create", "enable", "convert"]):
         return "feature"
     if any(w in text for w in ["test", "coverage", "spec"]):
         return "teste"
@@ -133,22 +143,34 @@ def categorize_bounty(title, labels):
 
 def is_ai_friendly(labels):
     """Verifica se a bounty e amigavel para agentes AI."""
-    return any(tag in labels.lower() for tag in ["ai agent", "ai only", "ai friendly", "ai-friendly"])
+    return any(tag in " ".join(labels).lower() for tag in ["ai agent", "ai only", "ai friendly", "ai-friendly"])
 
 
 def search_all_bounties():
-    """Busca bounties de multiplas fontes."""
+    """Busca bounties de multiplas fontes via GitHub API."""
     queries = [
-        "label:bounty",
-        "label:💎-Bounty",
-        "label:reward",
+        # Algora bounties (most reliable)
+        'commenter:algora-pbc[bot]+is:open+is:issue',
+        # Direct $ labels
+        'is:open+is:issue+label:"$10"+comments:0..10',
+        'is:open+is:issue+label:"$20"+comments:0..10',
+        'is:open+is:issue+label:"$30"+comments:0..10',
+        'is:open+is:issue+label:"$50"+comments:0..10',
+        'is:open+is:issue+label:"$75"+comments:0..10',
+        'is:open+is:issue+label:"$100"+comments:0..10',
+        'is:open+is:issue+label:"$150"+comments:0..10',
+        # Generic bounty labels
+        'is:open+is:issue+label:bounty+comments:0..5',
     ]
 
     all_results = []
     seen_urls = set()
 
-    for query in queries:
-        items = run_gh_search(query, limit=30)
+    for i, query in enumerate(queries):
+        source = "algora" if "algora" in query else "label"
+        print(f"  [{i+1}/{len(queries)}] Searching: {query[:60]}...", file=sys.stderr)
+        items = run_gh_api(query, limit=20)
+
         for item in items:
             url = item.get("url", "")
             if url in seen_urls:
@@ -156,11 +178,11 @@ def search_all_bounties():
             seen_urls.add(url)
 
             title = item.get("title", "")
-            labels = item.get("labels", "")
+            labels = item.get("labels", [])
             repo = item.get("repo", "")
+            comments = item.get("comments", 0)
 
-            combined = title + " " + labels
-            value = extract_bounty_value(combined)
+            value = extract_bounty_value(labels, title)
             ai_friendly = is_ai_friendly(labels)
             category = categorize_bounty(title, labels)
             trust = get_trust_level(repo, value, title, labels)
@@ -174,6 +196,8 @@ def search_all_bounties():
                 "ai_friendly": ai_friendly,
                 "labels": labels,
                 "trust": trust,
+                "comments": comments,
+                "source": source,
             })
 
     return all_results
@@ -186,14 +210,14 @@ def display_bounties(bounties):
         return
 
     trust_icons = {
-        "VERDE":    "[OK] ",
-        "AMARELO":  "[???]",
+        "VERDE": "[OK] ",
+        "AMARELO": "[???]",
         "VERMELHO": "[!!!]",
     }
     trust_order = {"VERDE": 0, "AMARELO": 1, "VERMELHO": 2}
     trust_sections = {
-        "VERDE":    "CONFIAVEIS — pagamento provavel",
-        "AMARELO":  "CAUTELA — verificar antes de trabalhar",
+        "VERDE": "CONFIAVEIS — pagamento provavel",
+        "AMARELO": "CAUTELA — verificar antes de trabalhar",
         "VERMELHO": "SUSPEITAS — NAO recomendadas (possivel scam)",
     }
 
@@ -208,14 +232,13 @@ def display_bounties(bounties):
     print(f"\n{'='*82}")
     print(f" BOUNTY HUNTER - {total} bounties encontradas")
     print(f" {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print(f" [OK]=confiavel  [???]=cautela  [!!!]=suspeito")
+    print(f" [OK]=confiavel [???]=cautela [!!!]=suspeito")
     print(f"{'='*82}")
 
     current_trust = None
     global_idx = 0
 
     for b in bounties:
-        # Imprimir header da secao quando mudar a confiabilidade
         if b["trust"] != current_trust:
             current_trust = b["trust"]
             count = sum(1 for x in bounties if x["trust"] == current_trust)
@@ -228,13 +251,13 @@ def display_bounties(bounties):
         global_idx += 1
         value_str = f"${b['value']:,.0f}" if b['value'] else "$?"
         trust_icon = trust_icons.get(b["trust"], "[???]")
-        ai_tag = " AI" if b["ai_friendly"] else "   "
+        ai_tag = " AI" if b["ai_friendly"] else "  "
         cat = b["category"].upper()[:12]
+        comments = b.get("comments", "?")
 
-        print(f"  {global_idx:2d}. {trust_icon} {value_str:>8s}  {cat:<13s}{ai_tag}")
-        print(f"      {b['title'][:74]}")
-        print(f"      {b['repo']}")
-        print(f"      {b['url']}")
+        print(f" {global_idx:2d}. {trust_icon} {value_str:>8s} {cat:<13s}{ai_tag} {comments}c")
+        print(f"     {b['title'][:74]}")
+        print(f"     {b['repo']} → {b['url']}")
         print()
 
     # Resumo
@@ -246,7 +269,7 @@ def display_bounties(bounties):
 
     print(f" {'='*82}")
     print(f" RESUMO: {verde} confiaveis | {amarelo} cautela | {vermelho} suspeitas")
-    print(f" POTENCIAL CONFIavel: ${potencial_verde:,.0f} | Total: ${potencial_total:,.0f}")
+    print(f" POTENCIAL CONFiAVEL: ${potencial_verde:,.0f} | Total: ${potencial_total:,.0f}")
     print(f"{'='*82}\n")
 
 
