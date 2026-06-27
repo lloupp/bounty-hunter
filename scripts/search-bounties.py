@@ -10,7 +10,8 @@ import re
 import json
 import os
 import sys
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 
 BH_DIR = os.path.expanduser("~/bounty-hunter")
 RESULTS_DIR = os.path.join(BH_DIR, "results")
@@ -44,15 +45,24 @@ SUSPECT_SIGNALS = [
 ]
 
 
-def run_gh_api(query, limit=30):
-    """Roda gh api search/issues e retorna parsed JSON."""
+def run_gh_api(query, limit=30, retries=1):
+    """Roda gh api search/issues e retorna parsed JSON.
+
+    Faz 1 retry com backoff se a API sinalizar rate limit (secondary
+    rate limit do GitHub Search costuma liberar depois de ~60s).
+    """
     cmd = [
         "gh", "api", f"search/issues?q={query}&sort=updated&order=desc&per_page={limit}",
         "--jq", '.items[] | {repo: (.repository_url | split("/") | .[-2] + "/" + .[-1]), number, title: .title, url: .html_url, comments, labels: [.labels[].name], created: .created_at, updated: .updated_at}'
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if result.returncode != 0:
-        print(f"  [warn] Search failed: {result.stderr[:100]}", file=sys.stderr)
+        stderr = result.stderr.strip()
+        if retries > 0 and ("rate limit" in stderr.lower() or "403" in stderr):
+            print(f"  [warn] Rate limited, aguardando 60s antes de tentar de novo...", file=sys.stderr)
+            time.sleep(60)
+            return run_gh_api(query, limit=limit, retries=retries - 1)
+        print(f"  [warn] Search failed: {stderr[:300]}", file=sys.stderr)
         return []
 
     items = []
@@ -89,18 +99,63 @@ def extract_bounty_value(labels, title=""):
     return None
 
 
-def get_trust_level(repo, value, title, labels):
+def load_learned_trust():
+    """
+    Aprende confiabilidade a partir do historico real:
+    - repo que ja pagou (earnings.log) -> confiavel
+    - repo trabalhado ha mais de 30 dias e nunca pago -> suspeito
+    """
+    learned_trusted = set()
+    learned_suspect = set()
+
+    earnings_path = os.path.join(BH_DIR, "logs", "earnings.log")
+    hunt_path = os.path.join(BH_DIR, "logs", "hunt.log")
+
+    if os.path.exists(earnings_path):
+        with open(earnings_path) as f:
+            for line in f:
+                parts = [p.strip() for p in line.split("|")]
+                if len(parts) >= 3 and parts[1] == "PAGO":
+                    learned_trusted.add(parts[2])
+
+    if os.path.exists(hunt_path):
+        cutoff = datetime.now(tz=None).astimezone() - timedelta(days=30)
+        with open(hunt_path) as f:
+            for line in f:
+                parts = [p.strip() for p in line.split("|")]
+                if len(parts) < 4:
+                    continue
+                repo = parts[3]
+                if repo in learned_trusted:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(parts[0])
+                except ValueError:
+                    continue
+                if ts < cutoff:
+                    learned_suspect.add(repo)
+
+    return learned_trusted, learned_suspect
+
+
+def get_trust_level(repo, value, title, labels, learned_trusted=None, learned_suspect=None):
     """
     Classifica confiabilidade da bounty.
     VERDE = confiavel (pagamento provavel)
     AMARELO = cautela (precisa verificar)
     VERMELHO = suspeito (provavelmente nao paga ou e scam)
     """
+    learned_trusted = learned_trusted or set()
+    learned_suspect = learned_suspect or set()
     text = (title + " " + " ".join(labels)).lower()
     org = repo.split("/")[0] if "/" in repo else ""
 
-    # Hard-coded suspeitos
-    if repo in SUSPECT_REPOS:
+    # Pagamento real comprovado no seu historico bate qualquer heuristica
+    if repo in learned_trusted:
+        return "VERDE"
+
+    # Hard-coded suspeitos ou repo que voce trabalhou e nunca foi pago
+    if repo in SUSPECT_REPOS or repo in learned_suspect:
         return "VERMELHO"
 
     # Hard-coded confiaveis
@@ -161,15 +216,22 @@ def search_all_bounties():
         'is:open+is:issue+label:"$150"+comments:0..10',
         # Generic bounty labels
         'is:open+is:issue+label:bounty+comments:0..5',
+        # Outras fontes/sinais de bounty (diversificacao)
+        'is:open+is:issue+label:"💰"+comments:0..10',
+        'is:open+is:issue+label:"help wanted"+label:bounty+comments:0..10',
+        'is:open+is:issue+label:"good first issue"+label:bounty+comments:0..10',
     ]
 
     all_results = []
     seen_urls = set()
+    learned_trusted, learned_suspect = load_learned_trust()
 
     for i, query in enumerate(queries):
         source = "algora" if "algora" in query else "label"
         print(f"  [{i+1}/{len(queries)}] Searching: {query[:60]}...", file=sys.stderr)
         items = run_gh_api(query, limit=20)
+        if i < len(queries) - 1:
+            time.sleep(2)  # evita secondary rate limit do GitHub Search
 
         for item in items:
             url = item.get("url", "")
@@ -185,7 +247,7 @@ def search_all_bounties():
             value = extract_bounty_value(labels, title)
             ai_friendly = is_ai_friendly(labels)
             category = categorize_bounty(title, labels)
-            trust = get_trust_level(repo, value, title, labels)
+            trust = get_trust_level(repo, value, title, labels, learned_trusted, learned_suspect)
 
             all_results.append({
                 "title": title,

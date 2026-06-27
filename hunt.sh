@@ -39,6 +39,41 @@ print(json.dumps(b))
 "
 }
 
+_review_and_send() {
+    # Mostra o diff gerado pelo Codex e exige confirmacao manual antes
+    # de dar push/abrir PR. Nada e enviado sem voce ver o que mudou.
+    local WORKSPACE="$1" BASE_BRANCH="$2" NUM="$3" REPO="$4" TITLE="$5" VALUE="$6" MODE="$7"
+    local NEW_BRANCH
+    NEW_BRANCH=$(git -C "$WORKSPACE" rev-parse --abbrev-ref HEAD)
+
+    echo ""
+    echo "=== Revisao antes do envio ==="
+
+    if [ "$NEW_BRANCH" = "$BASE_BRANCH" ]; then
+        echo "Codex nao criou uma branch nova nem fez commit. Nada a enviar."
+        echo "$(date -Iseconds) | ${MODE}-NOOP | #$NUM | $REPO | $TITLE | \$$VALUE" >> "$LOG_DIR/hunt.log"
+        return
+    fi
+
+    git -C "$WORKSPACE" --no-pager log --oneline "$BASE_BRANCH..$NEW_BRANCH"
+    echo ""
+    git -C "$WORKSPACE" --no-pager diff "$BASE_BRANCH...$NEW_BRANCH" || true
+    echo ""
+    read -r -p "Revisei o diff acima. Enviar push + abrir PR? (s/N): " CONFIRM
+
+    if [[ "$CONFIRM" =~ ^[sS]$ ]]; then
+        git -C "$WORKSPACE" push -u origin "$NEW_BRANCH"
+        (cd "$WORKSPACE" && gh pr create --title "$TITLE" --body "Resolve: $TITLE
+
+Implementado com assistencia de IA; revisado antes do envio.") 2>&1 || \
+            echo "Nao foi possivel abrir o PR automaticamente. Rode 'gh pr create' manualmente em $WORKSPACE."
+        echo "$(date -Iseconds) | $MODE | #$NUM | $REPO | $TITLE | \$$VALUE" >> "$LOG_DIR/hunt.log"
+    else
+        echo "Envio cancelado. As mudancas ficam na branch '$NEW_BRANCH' em $WORKSPACE para revisao manual."
+        echo "$(date -Iseconds) | ${MODE}-PENDENTE | #$NUM | $REPO | $TITLE | \$$VALUE" >> "$LOG_DIR/hunt.log"
+    fi
+}
+
 case "${1:-search}" in
     search)
         echo "=== Buscando bounties ==="
@@ -100,17 +135,18 @@ for i, b in enumerate(data['bounties'], 1):
             cd "$WORKSPACE" && git pull 2>&1 || true
         fi
         
+        BASE_BRANCH=$(git -C "$WORKSPACE" rev-parse --abbrev-ref HEAD)
+
         echo ""
         echo "=== Delegando para Codex ==="
         echo ""
-        
+
         # Prompt detalhado para o Codex
-        PROMPT="Resolva esta GitHub issue: $TITLE. Issue URL: $URL. Instrucoes: 1) Leia a issue completa. 2) Entenda o contexto do projeto. 3) Implemente a correcao/feature. 4) Escreva testes se aplicavel. 5) Crie uma branch descritiva. 6) Faca commit e push. 7) Abra um PR referenciando a issue. NAO inclua informacoes de pagamento. NAO mencione IA ou automacao."
-        
+        PROMPT="Resolva esta GitHub issue: $TITLE. Issue URL: $URL. Instrucoes: 1) Leia a issue completa. 2) Entenda o contexto do projeto. 3) Implemente a correcao/feature. 4) Escreva testes se aplicavel e rode a suite de testes existente do projeto antes de finalizar. 5) Crie uma branch descritiva a partir de $BASE_BRANCH. 6) Faca commit das mudancas com mensagem clara, incluindo a nota 'Implementado com assistencia de IA; revisado antes do envio.'. NAO faca push e NAO abra PR - o envio sera revisado manualmente."
+
         codex exec --cwd "$WORKSPACE" "$PROMPT" 2>&1 | tee "$LOG_DIR/bounty-${NUM}-$(date +%Y%m%d-%H%M%S).log"
-        
-        # Log
-        echo "$(date -Iseconds) | WORK | #$NUM | $REPO | $TITLE | \$$VALUE" >> "$LOG_DIR/hunt.log"
+
+        _review_and_send "$WORKSPACE" "$BASE_BRANCH" "$NUM" "$REPO" "$TITLE" "$VALUE" "WORK"
         ;;
     
     quick)
@@ -137,15 +173,19 @@ for i, b in enumerate(data['bounties'], 1):
         if [ ! -d "$WORKSPACE" ]; then
             echo "Clonando $REPO..."
             gh repo clone "$REPO" "$WORKSPACE" 2>&1
+        else
+            cd "$WORKSPACE" && git pull 2>&1 || true
         fi
-        
-        # Prompt tipo "Chrisgpt" - simples e direto
-        PROMPT="Make me \$$VALUE and do what you are good at! Resolve this issue: $TITLE. URL: $URL"
-        
+
+        BASE_BRANCH=$(git -C "$WORKSPACE" rev-parse --abbrev-ref HEAD)
+
+        # Prompt rapido, mas sem ocultar autoria e sem push/PR automatico
+        PROMPT="Resolva esta issue de forma rapida e correta: $TITLE. URL: $URL. Crie uma branch descritiva a partir de $BASE_BRANCH, implemente, rode os testes do projeto e faca commit com a nota 'Implementado com assistencia de IA; revisado antes do envio.'. NAO faca push e NAO abra PR."
+
         echo "Dispatching Codex..."
         codex exec --cwd "$WORKSPACE" "$PROMPT" 2>&1 | tee "$LOG_DIR/bounty-${NUM}-quick-$(date +%Y%m%d-%H%M%S).log"
-        
-        echo "$(date -Iseconds) | QUICK | #$NUM | $REPO | $TITLE | \$$VALUE" >> "$LOG_DIR/hunt.log"
+
+        _review_and_send "$WORKSPACE" "$BASE_BRANCH" "$NUM" "$REPO" "$TITLE" "$VALUE" "QUICK"
         ;;
     
     status)
