@@ -55,7 +55,11 @@ def run_gh_api(query, limit=30, retries=1):
         "gh", "api", f"search/issues?q={query}&sort=updated&order=desc&per_page={limit}",
         "--jq", '.items[] | {repo: (.repository_url | split("/") | .[-2] + "/" + .[-1]), number, title: .title, url: .html_url, comments, labels: [.labels[].name], created: .created_at, updated: .updated_at}'
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except FileNotFoundError:
+        print("  [erro] 'gh' CLI nao encontrado. Instale: https://cli.github.com/", file=sys.stderr)
+        sys.exit(1)
     if result.returncode != 0:
         stderr = result.stderr.strip()
         if retries > 0 and ("rate limit" in stderr.lower() or "403" in stderr):
