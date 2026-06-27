@@ -7,6 +7,8 @@
 #   work N       - Delega bounty #N para o Claude Code
 #   quick N      - Delega bounty #N com prompt rapido (tipo Chrisgpt)
 #   status       - Mostra status dos trabalhos em andamento
+#   pending      - Lista trabalhos com envio pendente de revisao
+#   check        - Verifica PRs abertos e atualiza ganhos automaticamente
 #   earnings     - Mostra ganhos acumulados
 #   list         - Lista bounties do ultimo search
 
@@ -18,6 +20,20 @@ WORK_DIR="$BH_DIR/work"
 LOG_DIR="$BH_DIR/logs"
 
 mkdir -p "$RESULTS_DIR" "$WORK_DIR" "$LOG_DIR"
+
+_check_deps() {
+    local missing=()
+    for bin in "$@"; do
+        command -v "$bin" >/dev/null 2>&1 || missing+=("$bin")
+    done
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo "Erro: ferramenta(s) necessaria(s) nao encontrada(s) no PATH: ${missing[*]}" >&2
+        echo "  git    - https://git-scm.com/" >&2
+        echo "  gh     - https://cli.github.com/" >&2
+        echo "  claude - https://docs.claude.com/claude-code" >&2
+        exit 1
+    fi
+}
 
 _get_bounty() {
     local NUM="$1"
@@ -76,6 +92,7 @@ Implementado com assistencia de IA; revisado antes do envio.") 2>&1 || \
 
 case "${1:-search}" in
     search)
+        _check_deps gh
         echo "=== Buscando bounties ==="
         python3 "$BH_DIR/scripts/search-bounties.py"
         echo ""
@@ -101,13 +118,14 @@ for i, b in enumerate(data['bounties'], 1):
         ;;
     
     work)
+        _check_deps git gh claude
         NUM="${2:-}"
         if [ -z "$NUM" ]; then
             echo "Uso: ./hunt.sh work <NUMERO_DA_BOUNTY>"
             echo "Rode './hunt.sh list' para ver as bounties."
             exit 1
         fi
-        
+
         BOUNTY=$(_get_bounty "$NUM") || exit 1
         
         TITLE=$(echo "$BOUNTY" | python3 -c "import json,sys; print(json.load(sys.stdin)['title'])")
@@ -150,6 +168,7 @@ for i, b in enumerate(data['bounties'], 1):
         ;;
     
     quick)
+        _check_deps git gh claude
         NUM="${2:-}"
         if [ -z "$NUM" ]; then
             echo "Uso: ./hunt.sh quick <NUMERO_DA_BOUNTY>"
@@ -200,6 +219,42 @@ for i, b in enumerate(data['bounties'], 1):
         ls -1 "$WORK_DIR" 2>/dev/null || echo "  (nenhum)"
         ;;
     
+    pending)
+        echo "=== Trabalhos pendentes de revisao/envio ==="
+        if [ ! -f "$LOG_DIR/hunt.log" ]; then
+            echo "Nenhum trabalho registrado ainda."
+            exit 0
+        fi
+        python3 -c "
+WORK_DIR = '$WORK_DIR'
+
+latest = {}
+with open('$LOG_DIR/hunt.log') as f:
+    for line in f:
+        parts = [p.strip() for p in line.strip().split('|')]
+        if len(parts) < 6:
+            continue
+        ts, mode, num, repo, title, value = parts[:6]
+        latest[(repo, title)] = (ts, mode, num, repo, title, value)
+
+pending = sorted(v for v in latest.values() if v[1].endswith('-PENDENTE'))
+if not pending:
+    print('Nenhum trabalho pendente. Tudo revisado/enviado.')
+else:
+    for ts, mode, num, repo, title, value in pending:
+        workspace = repo.replace('/', '-')
+        print(f'  {repo:<28s} {value:>8s}  {title[:50]}')
+        print(f'    pendente desde {ts}')
+        print(f'    workspace: {WORK_DIR}/{workspace}')
+"
+        ;;
+
+    check)
+        _check_deps gh
+        echo "=== Verificando PRs e atualizando ganhos ==="
+        python3 "$BH_DIR/scripts/check-prs.py"
+        ;;
+
     earnings)
         echo "=== Ganhos ==="
         if [ -f "$LOG_DIR/earnings.log" ]; then
@@ -226,6 +281,8 @@ for i, b in enumerate(data['bounties'], 1):
         echo "  work N       Delega bounty #N para Claude Code (prompt detalhado)"
         echo "  quick N      Delega bounty #N para Claude Code (prompt rapido estilo Chrisgpt)"
         echo "  status       Mostra status dos trabalhos"
+        echo "  pending      Lista trabalhos com envio pendente de revisao"
+        echo "  check        Verifica PRs abertos e atualiza ganhos automaticamente"
         echo "  earnings     Mostra ganhos acumulados"
         exit 1
         ;;

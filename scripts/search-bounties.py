@@ -225,6 +225,8 @@ def search_all_bounties():
         'is:open+is:issue+label:"help wanted"+label:bounty+comments:0..10',
         'is:open+is:issue+label:"good first issue"+label:bounty+comments:0..10',
     ]
+    # Pula issues ja atribuidas a alguem (provavelmente ja sendo trabalhadas)
+    queries = [q + "+no:assignee" for q in queries]
 
     all_results = []
     seen_urls = set()
