@@ -13,7 +13,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 
-BH_DIR = os.path.expanduser("~/bounty-hunter")
+BH_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS_DIR = os.path.join(BH_DIR, "results")
 
 # --- Confiabilidade ---
@@ -55,7 +55,15 @@ def run_gh_api(query, limit=30, retries=1):
         "gh", "api", f"search/issues?q={query}&sort=updated&order=desc&per_page={limit}",
         "--jq", '.items[] | {repo: (.repository_url | split("/") | .[-2] + "/" + .[-1]), number, title: .title, url: .html_url, comments, labels: [.labels[].name], created: .created_at, updated: .updated_at}'
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except FileNotFoundError:
+        print(
+            "  [erro] Comando 'gh' nao encontrado. Instale o GitHub CLI "
+            "(https://cli.github.com) e rode 'gh auth login' antes de buscar bounties.",
+            file=sys.stderr,
+        )
+        return []
     if result.returncode != 0:
         stderr = result.stderr.strip()
         if retries > 0 and ("rate limit" in stderr.lower() or "403" in stderr):

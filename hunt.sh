@@ -4,20 +4,52 @@
 #
 # Comandos:
 #   search       - Busca bounties disponiveis
-#   work N       - Delega bounty #N para o Codex
+#   work N       - Delega bounty #N para o agente de IA
 #   quick N      - Delega bounty #N com prompt rapido (tipo Chrisgpt)
 #   status       - Mostra status dos trabalhos em andamento
 #   earnings     - Mostra ganhos acumulados
 #   list         - Lista bounties do ultimo search
+#
+# Agente usado em work/quick: variavel BH_AGENT (codex|claude), default "codex".
+#   BH_AGENT=claude ./hunt.sh work 1
 
 set -euo pipefail
 
-BH_DIR="$HOME/bounty-hunter"
+BH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESULTS_DIR="$BH_DIR/results"
 WORK_DIR="$BH_DIR/work"
 LOG_DIR="$BH_DIR/logs"
+BH_AGENT="${BH_AGENT:-codex}"
 
 mkdir -p "$RESULTS_DIR" "$WORK_DIR" "$LOG_DIR"
+
+_dispatch_agent() {
+    # Roda o prompt no agente escolhido (codex ou claude code), sempre
+    # dentro do workspace da bounty. Nenhum dos dois deve dar push/PR
+    # automatico - isso e feito (ou nao) em _review_and_send.
+    local WORKSPACE="$1" PROMPT="$2" LOGFILE="$3"
+
+    case "$BH_AGENT" in
+        codex)
+            command -v codex >/dev/null 2>&1 || {
+                echo "Erro: comando 'codex' nao encontrado. Instale-o ou use BH_AGENT=claude." >&2
+                exit 1
+            }
+            codex exec --cwd "$WORKSPACE" "$PROMPT" 2>&1 | tee "$LOGFILE"
+            ;;
+        claude)
+            command -v claude >/dev/null 2>&1 || {
+                echo "Erro: comando 'claude' nao encontrado. Instale o Claude Code ou use BH_AGENT=codex." >&2
+                exit 1
+            }
+            (cd "$WORKSPACE" && claude -p "$PROMPT" --permission-mode acceptEdits) 2>&1 | tee "$LOGFILE"
+            ;;
+        *)
+            echo "Erro: BH_AGENT desconhecido: '$BH_AGENT' (use 'codex' ou 'claude')." >&2
+            exit 1
+            ;;
+    esac
+}
 
 _get_bounty() {
     local NUM="$1"
@@ -138,13 +170,13 @@ for i, b in enumerate(data['bounties'], 1):
         BASE_BRANCH=$(git -C "$WORKSPACE" rev-parse --abbrev-ref HEAD)
 
         echo ""
-        echo "=== Delegando para Codex ==="
+        echo "=== Delegando para o agente ($BH_AGENT) ==="
         echo ""
 
-        # Prompt detalhado para o Codex
+        # Prompt detalhado para o agente
         PROMPT="Resolva esta GitHub issue: $TITLE. Issue URL: $URL. Instrucoes: 1) Leia a issue completa. 2) Entenda o contexto do projeto. 3) Implemente a correcao/feature. 4) Escreva testes se aplicavel e rode a suite de testes existente do projeto antes de finalizar. 5) Crie uma branch descritiva a partir de $BASE_BRANCH. 6) Faca commit das mudancas com mensagem clara, incluindo a nota 'Implementado com assistencia de IA; revisado antes do envio.'. NAO faca push e NAO abra PR - o envio sera revisado manualmente."
 
-        codex exec --cwd "$WORKSPACE" "$PROMPT" 2>&1 | tee "$LOG_DIR/bounty-${NUM}-$(date +%Y%m%d-%H%M%S).log"
+        _dispatch_agent "$WORKSPACE" "$PROMPT" "$LOG_DIR/bounty-${NUM}-$(date +%Y%m%d-%H%M%S).log"
 
         _review_and_send "$WORKSPACE" "$BASE_BRANCH" "$NUM" "$REPO" "$TITLE" "$VALUE" "WORK"
         ;;
@@ -182,8 +214,8 @@ for i, b in enumerate(data['bounties'], 1):
         # Prompt rapido, mas sem ocultar autoria e sem push/PR automatico
         PROMPT="Resolva esta issue de forma rapida e correta: $TITLE. URL: $URL. Crie uma branch descritiva a partir de $BASE_BRANCH, implemente, rode os testes do projeto e faca commit com a nota 'Implementado com assistencia de IA; revisado antes do envio.'. NAO faca push e NAO abra PR."
 
-        echo "Dispatching Codex..."
-        codex exec --cwd "$WORKSPACE" "$PROMPT" 2>&1 | tee "$LOG_DIR/bounty-${NUM}-quick-$(date +%Y%m%d-%H%M%S).log"
+        echo "Dispatching agente ($BH_AGENT)..."
+        _dispatch_agent "$WORKSPACE" "$PROMPT" "$LOG_DIR/bounty-${NUM}-quick-$(date +%Y%m%d-%H%M%S).log"
 
         _review_and_send "$WORKSPACE" "$BASE_BRANCH" "$NUM" "$REPO" "$TITLE" "$VALUE" "QUICK"
         ;;
@@ -223,10 +255,12 @@ for i, b in enumerate(data['bounties'], 1):
         echo "Comandos:"
         echo "  search       Busca bounties disponiveis"
         echo "  list         Lista bounties do ultimo search"
-        echo "  work N       Delega bounty #N para Codex (prompt detalhado)"
-        echo "  quick N      Delega bounty #N para Codex (prompt rapido estilo Chrisgpt)"
+        echo "  work N       Delega bounty #N para o agente (prompt detalhado)"
+        echo "  quick N      Delega bounty #N para o agente (prompt rapido estilo Chrisgpt)"
         echo "  status       Mostra status dos trabalhos"
         echo "  earnings     Mostra ganhos acumulados"
+        echo ""
+        echo "Agente usado em work/quick: BH_AGENT=codex|claude (default: codex)"
         exit 1
         ;;
 esac
