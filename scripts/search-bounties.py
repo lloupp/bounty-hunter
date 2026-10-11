@@ -13,7 +13,11 @@ import sys
 import time
 from datetime import datetime, timedelta
 
-BH_DIR = os.path.expanduser("~/bounty-hunter")
+# Raiz do projeto: derivada da localizacao deste arquivo (pai de scripts/),
+# com override opcional via variavel de ambiente BOUNTY_HUNTER_DIR.
+BH_DIR = os.environ.get("BOUNTY_HUNTER_DIR") or os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))
+)
 RESULTS_DIR = os.path.join(BH_DIR, "results")
 
 # --- Confiabilidade ---

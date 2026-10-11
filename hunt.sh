@@ -12,7 +12,9 @@
 
 set -euo pipefail
 
-BH_DIR="$HOME/bounty-hunter"
+# Raiz do projeto: diretorio deste script, com override via BOUNTY_HUNTER_DIR.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BH_DIR="${BOUNTY_HUNTER_DIR:-$SCRIPT_DIR}"
 RESULTS_DIR="$BH_DIR/results"
 WORK_DIR="$BH_DIR/work"
 LOG_DIR="$BH_DIR/logs"
